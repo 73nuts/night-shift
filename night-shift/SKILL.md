@@ -91,15 +91,30 @@ mkdir -p ~/reports/night-shift
 
 TASK_DATE=$(date +%Y-%m-%d)
 TASK_SLUG="{descriptive-slug}"
-OUTPUT_FILE="$HOME/reports/night-shift/${TASK_SLUG}-${TASK_DATE}.md"
+LOG_FILE="$HOME/reports/night-shift/${TASK_SLUG}-${TASK_DATE}.log"
+PROMPT_FILE="/tmp/night-shift-${TASK_SLUG}-${TASK_DATE}.txt"
 
-nohup claude -p --dangerously-skip-permissions "{constructed prompt}" \
-  > "$OUTPUT_FILE" 2>&1 & disown
+cat > "$PROMPT_FILE" << 'NIGHT_SHIFT_EOF'
+{constructed prompt}
+NIGHT_SHIFT_EOF
 
+nohup claude -p --dangerously-skip-permissions \
+  --system-prompt-file "$PROMPT_FILE" \
+  "Execute the research task described in the system prompt. Write all reports to ~/reports/night-shift/. When complete, confirm what was written." \
+  > "$LOG_FILE" 2>&1 &
+disown
 echo "PID: $!"
 ```
 
 Replace `{constructed prompt}` with the full prompt from Step 2. Replace `{descriptive-slug}` with a short kebab-case name for the task.
+
+**Why `--system-prompt-file` instead of positional argument or stdin:**
+
+- **Positional argument** (`claude -p "long prompt"`) hits shell `ARG_MAX` limits on complex prompts and requires careful escaping of quotes, backticks, and special characters.
+- **Stdin redirect** (`claude -p < file` inside nohup) **silently fails**. `nohup` closes stdin (fd 0), so the `<` redirect produces immediate EOF — claude receives zero bytes and exits with no error. This is a POSIX behavior, not a claude bug.
+- **`--system-prompt-file`** reads the file directly (no shell intermediary), handles arbitrary length, and avoids both problems.
+
+The report is NOT written to stdout. Claude uses its Write tool to create report files directly in `~/reports/night-shift/`. The `LOG_FILE` captures claude's conversational output (tool call logs, progress messages) which may be buffered — check report files, not the log, for results.
 
 ## Step 4: Confirm to user
 
@@ -108,11 +123,13 @@ Report back:
 Night shift launched.
 - Task: {brief description}
 - PID: {pid}
-- Output: ~/reports/night-shift/{filename}.md
+- Report: ~/reports/night-shift/{slug}-{date}.md (written by Claude's Write tool)
+- Log: ~/reports/night-shift/{slug}-{date}.log (may appear empty due to stdout buffering — that's normal)
 - Estimated duration: {estimate based on task scope}
 
 You can close the terminal and leave. Report will be waiting tomorrow.
 To check if it's still running: ps aux | grep {pid}
+If the report file doesn't exist yet, the task is still in progress. Check the log file for errors only if the process has exited AND no report was produced.
 ```
 
 Estimate duration based on scope: narrow lookup ~10 min, broad survey ~30 min, deep research with verification ~60+ min.

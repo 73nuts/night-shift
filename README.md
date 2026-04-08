@@ -108,11 +108,15 @@ Claude builds a **self-contained prompt** — this is the key engineering decisi
 ### 3. Launch
 
 ```bash
-nohup claude -p --dangerously-skip-permissions "{prompt}" \
-  > ~/reports/night-shift/your-report.md 2>&1 & disown
+# Prompt saved to a temp file, passed via --system-prompt-file
+nohup claude -p --dangerously-skip-permissions \
+  --system-prompt-file /tmp/night-shift-prompt.txt \
+  "Execute the research task. Write reports to ~/reports/night-shift/." \
+  > ~/reports/night-shift/session.log 2>&1 &
+disown
 ```
 
-One detached process. Your terminal is free. Close it, shut the laptop, go to bed. The process runs independently.
+One detached process. Your terminal is free. Close it, shut the laptop, go to bed. The process runs independently. Reports are written directly as files by Claude's Write tool — check the report files, not the log.
 
 ### 4. Research
 
@@ -277,7 +281,9 @@ Yes. Each is an independent process. Two deep research runs in parallel will bur
 <details>
 <summary><b>What if it crashes mid-research?</b></summary>
 
-Night Shift writes incrementally. If the process dies, you get a partial report with whatever completed. Not ideal, but you don't lose everything.
+Night Shift writes reports directly to `~/reports/night-shift/` using Claude's Write tool. If the process dies, you get whatever was written before the crash. For long tasks, the prompt instructs Claude to save partial results incrementally.
+
+If the report file is empty but the process exited, check the `.log` file for errors. Common causes: rate limit exhaustion, network timeout, or prompt parsing issues.
 </details>
 
 <details>
@@ -287,8 +293,14 @@ Night Shift writes incrementally. If the process dies, you get a partial report 
 # Still running?
 ps aux | grep claude
 
+# Check if report files exist yet (Claude writes them directly via its Write tool)
+ls -la ~/reports/night-shift/
+
 # Peek at partial results
 tail -50 ~/reports/night-shift/your-report.md
+
+# The session log may appear empty due to stdout buffering under nohup — that's normal.
+# Check the report files, not the log, for actual results.
 ```
 </details>
 

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.<USER>.night-shift-<TASK_SLUG></string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string><HOME>/bin/night-shift-daemon.sh</string>
+        <string><HOME>/reports/night-shift/prompts/<DATE>_<TASK_SLUG>.md</string>
+        <string><TASK_SLUG></string>
+    </array>
+    <!-- Fire once at this specific time (YYYY-MM-DD HH:MM local). -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Month</key>
+        <integer><MONTH></integer>
+        <key>Day</key>
+        <integer><DAY></integer>
+        <key>Hour</key>
+        <integer><HOUR></integer>
+        <key>Minute</key>
+        <integer><MINUTE></integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string><HOME>/reports/night-shift/logs/launchd-<TASK_SLUG>-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string><HOME>/reports/night-shift/logs/launchd-<TASK_SLUG>-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string><HOME>/.local/bin:<HOME>/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string><HOME></string>
+        <key>MAX_BUDGET_USD</key>
+        <string>8</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

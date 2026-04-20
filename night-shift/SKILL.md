@@ -1,7 +1,7 @@
 ---
 name: night-shift
 description: |
-  Kick off long-running AI tasks before leaving desk — deep research, parallel PoC exploration, issue triage. Launches a headless Claude session in background, produces reports only, never modifies code or pushes. Gives you a "warm start" next morning. Make sure to use this skill whenever the user is about to leave, wants background research, or says "I'm heading out, can you work on this" — even if they don't say "night shift".
+  Kick off long-running AI tasks before leaving desk — deep research, parallel PoC exploration, issue triage. Launches a headless Claude session under launchd as a system-level daemon, so it survives terminal and Claude Code REPL exits. Auto-resumes after 5-hour rate-limit windows via `claude --resume`. Telegram notifications on start / pause / resume / done / fail. Produces reports only, never modifies code or pushes. Gives you a "warm start" next morning. Use this skill whenever the user is about to leave, wants background research, or says "I'm heading out, can you work on this" — even if they don't say "night shift".
   Triggers on "/night-shift", "night shift", "before I go", "run this overnight", "research while I sleep", "warm start", "background research".
 
   **Perfect for:**
@@ -81,58 +81,135 @@ Structure:
 6. Sources with URLs
 7. Suggested first action for tomorrow morning
 
+## COMPLETION PROTOCOL
+After all deliverables are written and verified, execute:
+  touch ~/reports/night-shift/state/{TASK_SLUG}.done
+The launchd daemon polls this file. Without it, the daemon will attempt another resume round.
+
 Take your time. Quality over speed. User is not waiting.
 ```
 
-## Step 3: Launch headless session
+## Execution Mode
+
+Two modes. **Default is launchd daemon** (Step 3 below). Only fall back to the legacy `nohup` mode (appendix) for quick tasks estimated under 15 minutes that do NOT require resume-after-rate-limit.
+
+### Why launchd is default
+
+The legacy `nohup + disown` approach runs `claude -p` as a child of the user's terminal. Two failure modes hit real work:
+1. **Terminal close or Claude Code REPL exit kills the child** via SIGHUP (despite `nohup`, some shell setups still propagate). Reports at `~/reports/night-shift/` show empty logs when this happens.
+2. **5-hour rate-limit windows**: long research blows through the quota mid-run. `claude -p` exits with an error, work is lost, no auto-resume.
+
+The launchd daemon mode solves both: the daemon is a system-level process independent of any terminal/REPL, and it auto-resumes via `claude --resume <session-id>` after sleeping through the rate-limit window.
+
+macOS only. On Linux, port to `systemd --user` with `OnCalendar=` (structure identical, replace launchctl with systemctl --user).
+
+## Step 3: Launch headless session (launchd daemon — default)
+
+Prerequisite (one-time, skip if `~/bin/night-shift-daemon.sh` already exists): copy the daemon template to `~/bin/`.
 
 ```bash
-mkdir -p ~/reports/night-shift
+[ -f ~/bin/night-shift-daemon.sh ] || {
+  mkdir -p ~/bin
+  cp <skills-dir>/night-shift/daemon.sh.template ~/bin/night-shift-daemon.sh
+  chmod +x ~/bin/night-shift-daemon.sh
+  # Edit TG_CHAT_ID inside the script (or export TG_CHAT_ID env) if Telegram notifications are wanted.
+  # Telegram bot token is read from ~/.claude/channels/telegram/.env — adjust the path if your setup differs.
+}
+```
+
+Per-task setup:
+
+```bash
+mkdir -p ~/reports/night-shift/prompts ~/reports/night-shift/logs ~/reports/night-shift/state
 
 TASK_DATE=$(date +%Y-%m-%d)
-TASK_SLUG="{descriptive-slug}"
-LOG_FILE="$HOME/reports/night-shift/${TASK_SLUG}-${TASK_DATE}.log"
-PROMPT_FILE="/tmp/night-shift-${TASK_SLUG}-${TASK_DATE}.txt"
+TASK_SLUG="{descriptive-slug}"   # kebab-case, becomes part of filenames and launchd label
+PROMPT_FILE="$HOME/reports/night-shift/prompts/${TASK_DATE}_${TASK_SLUG}.md"
 
+# Write the full prompt (from Step 2) to a file — NEVER pass long prompts on the command line
 cat > "$PROMPT_FILE" << 'NIGHT_SHIFT_EOF'
 {constructed prompt}
 NIGHT_SHIFT_EOF
 
-nohup claude -p --dangerously-skip-permissions \
-  --system-prompt-file "$PROMPT_FILE" \
-  "Execute the research task described in the system prompt. Write all reports to ~/reports/night-shift/. When complete, confirm what was written." \
-  > "$LOG_FILE" 2>&1 &
-disown
-echo "PID: $!"
+# Generate plist from template (see plist.template in this skill dir), or write inline:
+PLIST=~/Library/LaunchAgents/com.$(whoami).night-shift-${TASK_SLUG}.plist
+cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.$(whoami).night-shift-${TASK_SLUG}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${HOME}/bin/night-shift-daemon.sh</string>
+        <string>${PROMPT_FILE}</string>
+        <string>${TASK_SLUG}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Month</key><integer>{MONTH}</integer>
+        <key>Day</key><integer>{DAY}</integer>
+        <key>Hour</key><integer>{HOUR}</integer>
+        <key>Minute</key><integer>{MINUTE}</integer>
+    </dict>
+    <key>StandardOutPath</key><string>${HOME}/reports/night-shift/logs/launchd-${TASK_SLUG}-stdout.log</string>
+    <key>StandardErrorPath</key><string>${HOME}/reports/night-shift/logs/launchd-${TASK_SLUG}-stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key><string>${HOME}</string>
+        <key>MAX_BUDGET_USD</key><string>8</string>
+    </dict>
+    <key>RunAtLoad</key><false/>
+    <key>KeepAlive</key><false/>
+</dict>
+</plist>
+PLIST_EOF
+
+plutil -lint "$PLIST"
+launchctl unload "$PLIST" 2>/dev/null
+launchctl load -w "$PLIST"
+launchctl list | grep "night-shift-${TASK_SLUG}"
 ```
 
-Replace `{constructed prompt}` with the full prompt from Step 2. Replace `{descriptive-slug}` with a short kebab-case name for the task.
+Replace `{MONTH}/{DAY}/{HOUR}/{MINUTE}` with the target fire time in local 24h format. `StartCalendarInterval` with pinned month/day makes this a one-shot trigger.
 
-**Why `--system-prompt-file` instead of positional argument or stdin:**
+**Daemon behavior** (see `daemon.sh.template` in this skill directory for the full script):
+- Generates a stable UUID session-id on first run (stored at `~/reports/night-shift/state/<slug>.session`) — all subsequent resumes reuse the same session.
+- First run uses `claude -p --session-id <uuid> <prompt>`; resumes use `claude -p --resume <uuid> <nudge>`.
+- After each round, checks for a done marker at `~/reports/night-shift/state/<slug>.done` — the prompt must instruct Claude to `touch` this file when finished (see Completion Protocol in Step 2).
+- On non-zero exit: greps log for rate-limit keywords (`rate limit`, `usage limit`, `429`, `try again in`, `5-hour`). Match → sleep 5h5min → resume. Max 5 resume attempts.
+- Non-rate-limit errors abort immediately with a Telegram failure notification.
+- Telegram events: `start` / `rate-limited, pausing` / `done` / `failed` / `ambiguous`.
 
-- **Positional argument** (`claude -p "long prompt"`) hits shell `ARG_MAX` limits on complex prompts and requires careful escaping of quotes, backticks, and special characters.
-- **Stdin redirect** (`claude -p < file` inside nohup) **silently fails**. `nohup` closes stdin (fd 0), so the `<` redirect produces immediate EOF — claude receives zero bytes and exits with no error. This is a POSIX behavior, not a claude bug.
-- **`--system-prompt-file`** reads the file directly (no shell intermediary), handles arbitrary length, and avoids both problems.
-
-The report is NOT written to stdout. Claude uses its Write tool to create report files directly in `~/reports/night-shift/`. The `LOG_FILE` captures claude's conversational output (tool call logs, progress messages) which may be buffered — check report files, not the log, for results.
+**Manual test before waiting for the scheduled time** (optional):
+```bash
+~/bin/night-shift-daemon.sh ~/reports/night-shift/prompts/{DATE}_{slug}.md {slug}-test
+```
 
 ## Step 4: Confirm to user
 
 Report back:
 ```
-Night shift launched.
+Night shift scheduled.
 - Task: {brief description}
-- PID: {pid}
-- Report: ~/reports/night-shift/{slug}-{date}.md (written by Claude's Write tool)
-- Log: ~/reports/night-shift/{slug}-{date}.log (may appear empty due to stdout buffering — that's normal)
-- Estimated duration: {estimate based on task scope}
+- Fires at: {HH:MM} local via launchd
+- Daemon: ~/bin/night-shift-daemon.sh
+- Plist: ~/Library/LaunchAgents/com.<user>.night-shift-{slug}.plist (loaded)
+- Prompt: ~/reports/night-shift/prompts/{date}_{slug}.md
+- Logs: ~/reports/night-shift/logs/{slug}-*.log
+- State: ~/reports/night-shift/state/{slug}.{session,done,attempts}
+- Report destination: ~/reports/night-shift/{filename}.md
+- Rate-limit behavior: auto-sleep 5h5min and resume, up to 5 rounds
+- Notifications: Telegram (start / pause / resume / done / fail)
+- Estimated duration: {estimate}
 
-You can close the terminal and leave. Report will be waiting tomorrow.
-To check if it's still running: ps aux | grep {pid}
-If the report file doesn't exist yet, the task is still in progress. Check the log file for errors only if the process has exited AND no report was produced.
+You can close the terminal, quit Claude Code, close the laptop lid (but not power off).
+The daemon will fire at the scheduled time independent of this session.
 ```
 
-Estimate duration based on scope: narrow lookup ~10 min, broad survey ~30 min, deep research with verification ~60+ min.
+Estimate duration based on scope: narrow lookup ~10 min, broad survey ~30 min, deep research with verification ~60+ min. Note that rate-limit pauses add 5h per resume round.
 
 ## Task Type Examples
 
@@ -157,3 +234,34 @@ Estimate duration based on scope: narrow lookup ~10 min, broad survey ~30 min, d
 - **Security by layers**: Red lines in prompt (AI self-restraint) + settings.json deny list (harness enforcement). Neither alone is sufficient.
 - **Verification is the differentiator**: Verify key claims via tools. API endpoints need ALL required params tested. Code examples must run. The standard: can the user copy this into their code and have it work?
 - **Next morning**: End every report with "Suggested First Action" — what should the user do first when they see this report.
+
+## Appendix: Legacy nohup mode (quick tasks only)
+
+For tasks estimated under 15 minutes where rate-limit pause is not a concern and terminal-death risk is acceptable (user stays at the terminal and waits):
+
+```bash
+mkdir -p ~/reports/night-shift/logs
+TASK_DATE=$(date +%Y-%m-%d)
+TASK_SLUG="{slug}"
+PROMPT_FILE="/tmp/night-shift-${TASK_SLUG}-${TASK_DATE}.txt"
+LOG_FILE="$HOME/reports/night-shift/logs/${TASK_SLUG}-${TASK_DATE}.log"
+
+cat > "$PROMPT_FILE" << 'NIGHT_SHIFT_EOF'
+{constructed prompt}
+NIGHT_SHIFT_EOF
+
+nohup claude -p --dangerously-skip-permissions \
+  --system-prompt-file "$PROMPT_FILE" \
+  "Execute the research task described in the system prompt." \
+  > "$LOG_FILE" 2>&1 &
+disown
+echo "PID: $!"
+```
+
+Why this is a fallback, not default:
+- `nohup` does not reliably protect the child across all shell configurations; terminal close or Claude Code REPL exit can still SIGHUP the child in some setups.
+- No rate-limit detection or auto-resume — hitting the 5-hour quota aborts the run with no recovery.
+- No Telegram notifications unless bolted on manually.
+- `nohup` closes stdin (fd 0); pass the trigger as a positional argument, NOT via `< file` (silent EOF).
+- Use `--system-prompt-file` to avoid ARG_MAX on long prompts.
+- Quoted heredoc `<< 'NIGHT_SHIFT_EOF'` preserves prompt bytes verbatim (no variable expansion).

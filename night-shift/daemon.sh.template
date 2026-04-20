@@ -1,0 +1,162 @@
+#!/bin/bash
+# Night-shift daemon: runs a claude -p session detached from terminal/REPL,
+# auto-resumes after rate-limit waits, reports to Telegram.
+# Usage: night-shift-daemon.sh <prompt-file> <task-slug>
+# Designed to be invoked by launchd (see night-shift-*.plist) — survives terminal
+# and Claude Code REPL exits, supports 5-hour rate-limit windows via resume.
+
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+set -uo pipefail
+
+PROMPT_FILE="${1:?prompt file required}"
+TASK_SLUG="${2:?task slug required}"
+
+STATE_DIR="$HOME/reports/night-shift/state"
+LOG_DIR="$HOME/reports/night-shift/logs"
+SESSION_FILE="$STATE_DIR/${TASK_SLUG}.session"
+DONE_FILE="$STATE_DIR/${TASK_SLUG}.done"
+ATTEMPT_FILE="$STATE_DIR/${TASK_SLUG}.attempts"
+MAIN_LOG="$LOG_DIR/${TASK_SLUG}-$(date +%Y%m%d-%H%M%S).log"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR"
+
+MAX_RESUMES=5
+RESUME_WAIT_SEC=$((5 * 3600 + 5 * 60))  # 5h 5min — rate-limit window + buffer
+MAX_BUDGET_USD="${MAX_BUDGET_USD:-8}"
+
+# Telegram config — edit or populate via ~/.claude/channels/telegram/.env
+TG_TOKEN="$(grep TELEGRAM_BOT_TOKEN ~/.claude/channels/telegram/.env 2>/dev/null | cut -d= -f2)"
+TG_CHAT_ID="${TG_CHAT_ID:-<TELEGRAM_CHAT_ID>}"
+TG_PROXY="${TG_PROXY:-http://127.0.0.1:7897}"
+
+send_tg() {
+    local msg="$1"
+    [ -z "$TG_TOKEN" ] && return 0
+    [ "$TG_CHAT_ID" = "<TELEGRAM_CHAT_ID>" ] && return 0
+    curl -s -x "$TG_PROXY" \
+        "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+        -d chat_id="${TG_CHAT_ID}" \
+        -d text="${msg}" > /dev/null 2>&1 || true
+}
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$MAIN_LOG"
+}
+
+is_rate_limited() {
+    local output_file="$1"
+    grep -qiE "rate limit|usage limit|quota exceeded|too many requests|429|5-hour|5 hour|try again in" "$output_file" 2>/dev/null
+}
+
+if [ -f "$SESSION_FILE" ]; then
+    SESSION_ID="$(cat "$SESSION_FILE")"
+    RESUME_MODE=1
+    log "Resuming existing session: $SESSION_ID"
+else
+    SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+    echo "$SESSION_ID" > "$SESSION_FILE"
+    RESUME_MODE=0
+    log "New session: $SESSION_ID"
+fi
+
+ATTEMPTS=0
+[ -f "$ATTEMPT_FILE" ] && ATTEMPTS=$(cat "$ATTEMPT_FILE")
+
+START_MSG="[night-shift] start
+task: ${TASK_SLUG}
+session: ${SESSION_ID}
+mode: $([ $RESUME_MODE -eq 1 ] && echo resume || echo fresh)
+attempt: ${ATTEMPTS}/${MAX_RESUMES}
+log: ${MAIN_LOG}"
+send_tg "$START_MSG"
+log "$START_MSG"
+
+PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+RESUME_NUDGE="Continue the unfinished research task from the previous round. If all stages are complete and the report + HTML dashboard are written under ~/vault/night-shift/, create the done marker: touch $DONE_FILE"
+
+while :; do
+    ATTEMPTS=$((ATTEMPTS + 1))
+    echo "$ATTEMPTS" > "$ATTEMPT_FILE"
+    ROUND_LOG="$LOG_DIR/${TASK_SLUG}-round${ATTEMPTS}-$(date +%H%M%S).log"
+    log "=== Attempt $ATTEMPTS/$MAX_RESUMES → $ROUND_LOG ==="
+
+    if [ $RESUME_MODE -eq 0 ]; then
+        claude -p \
+            --session-id "$SESSION_ID" \
+            --permission-mode bypassPermissions \
+            --max-budget-usd "$MAX_BUDGET_USD" \
+            --disallowedTools "Bash(rm -rf*)" \
+            --disallowedTools "Bash(git push*)" \
+            "$PROMPT_CONTENT"$'\n\nAfter completing all tasks, execute: touch '"$DONE_FILE" \
+            > "$ROUND_LOG" 2>&1
+        EXIT=$?
+        RESUME_MODE=1
+    else
+        claude -p \
+            --resume "$SESSION_ID" \
+            --permission-mode bypassPermissions \
+            --max-budget-usd "$MAX_BUDGET_USD" \
+            --disallowedTools "Bash(rm -rf*)" \
+            --disallowedTools "Bash(git push*)" \
+            "$RESUME_NUDGE" \
+            > "$ROUND_LOG" 2>&1
+        EXIT=$?
+    fi
+
+    log "Round $ATTEMPTS exit=$EXIT"
+
+    if [ -f "$DONE_FILE" ]; then
+        FINISH_MSG="[night-shift] done
+task: ${TASK_SLUG}
+attempts: ${ATTEMPTS}
+log: ${MAIN_LOG}"
+        send_tg "$FINISH_MSG"
+        log "$FINISH_MSG"
+        exit 0
+    fi
+
+    if [ $EXIT -ne 0 ]; then
+        if is_rate_limited "$ROUND_LOG"; then
+            if [ $ATTEMPTS -ge $MAX_RESUMES ]; then
+                FAIL_MSG="[night-shift] failed: max resume attempts reached
+task: ${TASK_SLUG}
+attempts: ${ATTEMPTS}
+last log: ${ROUND_LOG}"
+                send_tg "$FAIL_MSG"
+                log "$FAIL_MSG"
+                exit 1
+            fi
+            WAIT_UNTIL=$(date -v +$((RESUME_WAIT_SEC))S '+%H:%M' 2>/dev/null || date -d "+${RESUME_WAIT_SEC} seconds" '+%H:%M')
+            WAIT_MSG="[night-shift] rate-limited, pausing
+task: ${TASK_SLUG}
+attempt: ${ATTEMPTS}
+will resume at ${WAIT_UNTIL} (sleep $((RESUME_WAIT_SEC/3600))h)"
+            send_tg "$WAIT_MSG"
+            log "$WAIT_MSG"
+            sleep "$RESUME_WAIT_SEC"
+            continue
+        else
+            FAIL_MSG="[night-shift] failed: non-rate-limit error
+task: ${TASK_SLUG}
+exit: ${EXIT}
+log: ${ROUND_LOG}
+tail: $(tail -20 "$ROUND_LOG" | tr '\n' ' ' | cut -c1-300)"
+            send_tg "$FAIL_MSG"
+            log "$FAIL_MSG"
+            exit $EXIT
+        fi
+    fi
+
+    if [ $ATTEMPTS -ge $MAX_RESUMES ]; then
+        AMBIG_MSG="[night-shift] ambiguous: exit 0 but no done marker after $ATTEMPTS rounds
+task: ${TASK_SLUG}
+log: ${ROUND_LOG}
+— manual inspection needed"
+        send_tg "$AMBIG_MSG"
+        log "$AMBIG_MSG"
+        exit 2
+    fi
+    log "Exit 0 but no done marker — nudging resume"
+    sleep 5
+done

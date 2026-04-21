@@ -72,7 +72,7 @@ log: ${MAIN_LOG}"
 send_tg "$START_MSG"
 log "$START_MSG"
 
-PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+FRESH_TRIGGER="Execute the research task described in the system prompt. After completing all tasks, execute: touch $DONE_FILE"
 RESUME_NUDGE="Continue the unfinished research task from the previous round. If all stages are complete and the report + HTML dashboard are written under ~/vault/night-shift/, create the done marker: touch $DONE_FILE"
 
 while :; do
@@ -82,13 +82,16 @@ while :; do
     log "=== Attempt $ATTEMPTS/$MAX_RESUMES → $ROUND_LOG ==="
 
     if [ $RESUME_MODE -eq 0 ]; then
+        # First run — use --system-prompt-file so the full prompt goes via a file,
+        # avoiding ARG_MAX limits and multiline positional-argument issues
         claude -p \
             --session-id "$SESSION_ID" \
+            --system-prompt-file "$PROMPT_FILE" \
             --permission-mode bypassPermissions \
             --max-budget-usd "$MAX_BUDGET_USD" \
             --disallowedTools "Bash(rm -rf*)" \
             --disallowedTools "Bash(git push*)" \
-            "$PROMPT_CONTENT"$'\n\nAfter completing all tasks, execute: touch '"$DONE_FILE" \
+            "$FRESH_TRIGGER" \
             > "$ROUND_LOG" 2>&1
         EXIT=$?
         RESUME_MODE=1

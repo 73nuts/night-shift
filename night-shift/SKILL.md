@@ -1,7 +1,7 @@
 ---
 name: night-shift
 description: |
-  Kick off long-running AI tasks before leaving desk — deep research, parallel PoC exploration, issue triage. Launches a headless Claude session under launchd as a system-level daemon, so it survives terminal and Claude Code REPL exits. Auto-resumes after 5-hour rate-limit windows via `claude --resume`. Telegram notifications on start / pause / resume / done / fail. Produces reports only, never modifies code or pushes. Gives you a "warm start" next morning. Use this skill whenever the user is about to leave, wants background research, or says "I'm heading out, can you work on this" — even if they don't say "night shift".
+  Kick off long-running AI tasks before leaving desk — deep research, parallel PoC exploration, issue triage. Launches a headless Claude session under launchd as a system-level daemon, so it survives terminal and Claude Code REPL exits. Auto-resumes after 5-hour rate-limit windows via `claude --resume`. Status is written to per-task files under `~/reports/night-shift/state/` and `logs/` — no push notifications. Produces reports only, never modifies code or pushes. Gives you a "warm start" next morning. Use this skill whenever the user is about to leave, wants background research, or says "I'm heading out, can you work on this" — even if they don't say "night shift".
   Triggers on "/night-shift", "night shift", "before I go", "run this overnight", "research while I sleep", "warm start", "background research".
 
   **Perfect for:**
@@ -112,8 +112,6 @@ Prerequisite (one-time, skip if `~/bin/night-shift-daemon.sh` already exists): c
   mkdir -p ~/bin
   cp <skills-dir>/night-shift/daemon.sh.template ~/bin/night-shift-daemon.sh
   chmod +x ~/bin/night-shift-daemon.sh
-  # Edit TG_CHAT_ID inside the script (or export TG_CHAT_ID env) if Telegram notifications are wanted.
-  # Telegram bot token is read from ~/.claude/channels/telegram/.env — adjust the path if your setup differs.
 }
 ```
 
@@ -180,8 +178,9 @@ Replace `{MONTH}/{DAY}/{HOUR}/{MINUTE}` with the target fire time in local 24h f
 - First run uses `claude -p --session-id <uuid> <prompt>`; resumes use `claude -p --resume <uuid> <nudge>`.
 - After each round, checks for a done marker at `~/reports/night-shift/state/<slug>.done` — the prompt must instruct Claude to `touch` this file when finished (see Completion Protocol in Step 2).
 - On non-zero exit: greps log for rate-limit keywords (`rate limit`, `usage limit`, `429`, `try again in`, `5-hour`). Match → sleep 5h5min → resume. Max 5 resume attempts.
-- Non-rate-limit errors abort immediately with a Telegram failure notification.
-- Telegram events: `start` / `rate-limited, pausing` / `done` / `failed` / `ambiguous`.
+- Non-rate-limit errors abort immediately.
+- Progress is written to `~/reports/night-shift/state/<slug>.status` as a single overwritten line with one of: `starting` / `running` / `paused` / `done` / `failed` / `ambiguous`. Quick check across all tasks: `cat ~/reports/night-shift/state/*.status`.
+- Round logs are written to `~/reports/night-shift/logs/<slug>-round<N>-*.log`; main log at `<slug>-<YYYYMMDD-HHMMSS>.log`.
 
 **Manual test before waiting for the scheduled time** (optional):
 ```bash
@@ -202,7 +201,7 @@ Night shift scheduled.
 - State: ~/reports/night-shift/state/{slug}.{session,done,attempts}
 - Report destination: ~/reports/night-shift/{filename}.md
 - Rate-limit behavior: auto-sleep 5h5min and resume, up to 5 rounds
-- Notifications: Telegram (start / pause / resume / done / fail)
+- Progress: `cat ~/reports/night-shift/state/{slug}.status`; no push notifications
 - Estimated duration: {estimate}
 
 You can close the terminal, quit Claude Code, close the laptop lid (but not power off).
@@ -261,7 +260,6 @@ echo "PID: $!"
 Why this is a fallback, not default:
 - `nohup` does not reliably protect the child across all shell configurations; terminal close or Claude Code REPL exit can still SIGHUP the child in some setups.
 - No rate-limit detection or auto-resume — hitting the 5-hour quota aborts the run with no recovery.
-- No Telegram notifications unless bolted on manually.
 - `nohup` closes stdin (fd 0); pass the trigger as a positional argument, NOT via `< file` (silent EOF).
 - Use `--system-prompt-file` to avoid ARG_MAX on long prompts.
 - Quoted heredoc `<< 'NIGHT_SHIFT_EOF'` preserves prompt bytes verbatim (no variable expansion).

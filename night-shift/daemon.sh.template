@@ -87,8 +87,8 @@ while :; do
             --system-prompt-file "$PROMPT_FILE" \
             --permission-mode bypassPermissions \
             --max-budget-usd "$MAX_BUDGET_USD" \
-            --disallowedTools "Bash(rm -rf*)" \
-            --disallowedTools "Bash(git push*)" \
+            --disallowedTools="Bash(rm -rf*)" \
+            --disallowedTools="Bash(git push*)" \
             "$FRESH_TRIGGER" \
             > "$ROUND_LOG" 2>&1
         EXIT=$?
@@ -98,8 +98,8 @@ while :; do
             --resume "$SESSION_ID" \
             --permission-mode bypassPermissions \
             --max-budget-usd "$MAX_BUDGET_USD" \
-            --disallowedTools "Bash(rm -rf*)" \
-            --disallowedTools "Bash(git push*)" \
+            --disallowedTools="Bash(rm -rf*)" \
+            --disallowedTools="Bash(git push*)" \
             "$RESUME_NUDGE" \
             > "$ROUND_LOG" 2>&1
         EXIT=$?

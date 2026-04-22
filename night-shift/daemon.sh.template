@@ -28,6 +28,55 @@ MAX_RESUMES=5
 RESUME_WAIT_SEC=$((5 * 3600 + 5 * 60))  # 5h 5min — rate-limit window + buffer
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-8}"
 
+# Active Context injection: headless `claude -p` does NOT inherit CLAUDE.md or
+# memory. Without an explicit project list it cannot relate findings to the
+# user's ongoing work. On fresh runs we prepend the `## Active Context` section
+# of the user's MEMORY.md to the prompt via a merged temp file. Set
+# NIGHT_SHIFT_MEMORY_FILE to override auto-location.
+MEMORY_FILE="${NIGHT_SHIFT_MEMORY_FILE:-}"
+if [ -z "$MEMORY_FILE" ]; then
+    # Auto-locate strategy:
+    # 1. Prefer ~/.claude/projects/-Users-<user>/memory/MEMORY.md (Claude Code's
+    #    default home-directory project mapping on macOS/Linux)
+    # 2. Fallback: any MEMORY.md containing a non-empty "## Active Context"
+    CANDIDATE="$HOME/.claude/projects/-Users-$(whoami)/memory/MEMORY.md"
+    if [ -f "$CANDIDATE" ] && grep -q "^## Active Context" "$CANDIDATE" 2>/dev/null; then
+        MEMORY_FILE="$CANDIDATE"
+    else
+        for f in "$HOME"/.claude/projects/*/memory/MEMORY.md; do
+            [ -f "$f" ] || continue
+            if grep -q "^## Active Context" "$f" 2>/dev/null; then
+                MEMORY_FILE="$f"
+                break
+            fi
+        done
+    fi
+fi
+
+MERGED_PROMPT="$STATE_DIR/${TASK_SLUG}.merged-prompt.md"
+trap 'rm -f "$MERGED_PROMPT"' EXIT
+
+build_merged_prompt() {
+    if [ -n "$MEMORY_FILE" ] && [ -f "$MEMORY_FILE" ]; then
+        {
+            echo "# User's Active Context (auto-injected from ${MEMORY_FILE})"
+            echo ""
+            echo "> The headless session does not inherit CLAUDE.md or memory. The block below is the user's current project portfolio. Use it to produce the MANDATORY \"Relevance to Active Projects\" section of the report."
+            echo ""
+            awk '/^## Active Context/{flag=1; print; next} /^## /{flag=0} flag' "$MEMORY_FILE"
+            echo ""
+            echo "---"
+            echo ""
+            cat "$PROMPT_FILE"
+        } > "$MERGED_PROMPT"
+        log "merged-prompt built: active context from $MEMORY_FILE + $PROMPT_FILE → $MERGED_PROMPT"
+        echo "$MERGED_PROMPT"
+    else
+        log "WARN: no MEMORY.md located (set NIGHT_SHIFT_MEMORY_FILE to override); running without Active Context injection"
+        echo "$PROMPT_FILE"
+    fi
+}
+
 # Single-line human-readable status. Each call overwrites the file, so
 # `cat ~/reports/night-shift/state/*.status` shows current state of every task.
 # Format: status | round N/M | detail | ts
@@ -80,11 +129,12 @@ while :; do
     write_status "running" "log=${ROUND_LOG##*/}"
 
     if [ $RESUME_MODE -eq 0 ]; then
-        # First run — use --system-prompt-file so the full prompt goes via a file,
-        # avoiding ARG_MAX limits and multiline positional-argument issues
+        # First run — merge Active Context + user prompt, use --system-prompt-file
+        # to avoid ARG_MAX / multiline positional issues
+        EFFECTIVE_PROMPT_FILE="$(build_merged_prompt)"
         claude -p \
             --session-id "$SESSION_ID" \
-            --system-prompt-file "$PROMPT_FILE" \
+            --system-prompt-file "$EFFECTIVE_PROMPT_FILE" \
             --permission-mode bypassPermissions \
             --max-budget-usd "$MAX_BUDGET_USD" \
             --disallowedTools="Bash(rm -rf*)" \

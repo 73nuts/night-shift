@@ -43,6 +43,8 @@ You are running a night-shift research task. User is away — work autonomously.
 - Output language: English
 - Confidence tags: [researched] (verified via search/tool), [project data] (from user's local files), [speculation] (your inference)
 - No emoji in output
+- **MANDATORY — Active projects context (main Claude must inject this verbatim when constructing the prompt)**:
+  Read the user's `MEMORY.md` (typically under `~/.claude/projects/*/memory/MEMORY.md`) and paste the `## Active Context` section here. The headless session does not inherit memory; without an explicit project list it cannot relate findings to the user's ongoing work. This is non-negotiable — if `## Active Context` is empty, state that explicitly instead of omitting the section. (The `daemon.sh.template` shipped with this skill also auto-injects this at launch time as a belt-and-suspenders fallback.)
 
 ## SECURITY RED LINES (ABSOLUTE)
 - NEVER execute: rm, rmdir, mkfs, dd, shred, wipefs
@@ -78,8 +80,14 @@ Structure:
 3. Verification results (table: claim | method | result)
 4. Comparison/evaluation matrix (if applicable)
 5. Actionable recommendations with trade-offs
-6. Sources with URLs
-7. Suggested first action for tomorrow morning
+6. **Relevance to Active Projects (MANDATORY section, not optional)** — For each project listed in USER CONTEXT above, write a subsection with:
+   - Relevance rating: **High / Medium / Low / None** (be honest; fabricated connections are worse than admitting no connection)
+   - Transferable insights: concrete takeaways from this research that apply to this project
+   - Warnings / anti-patterns: pitfalls this research surfaces that this project should avoid
+   - Concrete action (if any): what the user should do in this project based on findings, or "no action needed"
+   - End the whole section with one-paragraph overall conclusion: where the core transferable value of this research lives.
+7. Sources with URLs
+8. Suggested first action for tomorrow morning
 
 ## COMPLETION PROTOCOL
 After all deliverables are written and verified, execute:
